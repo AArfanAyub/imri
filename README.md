@@ -272,6 +272,7 @@ run.bat              double-click launcher for source runs
 build_exe.py         builds dist\IMRI.exe (PyInstaller one-file)
 release.py           cuts a clean source release folder + zip, and verifies it
 CHANGELOG.md         what shipped, what was fixed, what is still open
+DESCRIPTION.md       ready-made descriptions of this repo — one line, one paragraph, and the facts worth quoting
 DEVELOPING.md        how to build, how to test, how to start version two
 imri\                backend — stdlib only
   config.py          paths, defaults, validation rules, formatting
