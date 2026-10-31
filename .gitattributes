@@ -1,0 +1,13 @@
+# Normalise line endings so a checkout on Linux and a checkout on Windows do
+# not show every file as modified.
+* text=auto eol=lf
+
+# Batch files must stay CRLF: cmd.exe mis-parses labels in LF-only files.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary assets.
+*.exe binary
+*.png binary
+*.zip binary
+*.db binary

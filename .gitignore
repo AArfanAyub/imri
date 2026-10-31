@@ -1,0 +1,38 @@
+# --- runtime state -------------------------------------------------------
+# IMRI writes only here. Never commit a school's library data.
+data/
+.tmpdata/
+
+# --- build output -------------------------------------------------------
+build/
+dist/
+release/
+*.spec
+# The packaged binary is a build artifact, not source. It ships as a GitHub
+# Release asset instead, so it stays out of history where it would cost 10 MB
+# per rebuild and diff as pure noise.
+IMRI.exe
+*.exe
+*.pyc
+__pycache__/
+*.pyo
+
+# --- the reference application -----------------------------------------
+# Kept on disk as the 1:1 parity reference; not our code, not in history.
+reference/
+
+# --- session tooling ----------------------------------------------------
+.workbuddy-ai/
+
+# --- editors / OS -------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# --- local environment --------------------------------------------------
+.venv/
+venv/
+.env

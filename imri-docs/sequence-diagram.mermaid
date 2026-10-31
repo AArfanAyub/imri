@@ -1,0 +1,206 @@
+%% IMRI — key call flows
+%% Extracted from docs/ARCHITECTURE.md §6. Keep the two in sync.
+
+%% ============================================================ 1
+%% Activation gate -> login -> dashboard
+sequenceDiagram
+    autonumber
+    actor U as Librarian
+    participant W as app.js / router.js
+    participant H as HttpServer
+    participant G as LicenseGate
+    participant S as SecurityService
+    participant DB as Database
+
+    U->>W: open http://127.0.0.1:PORT/
+    W->>H: GET /api/bootstrap
+    H->>G: status()
+    G->>G: read data/license.json
+    alt file missing or corrupt
+        G->>DB: SELECT settings license_key, license_edition
+        G-->>H: {licensed:false} (mirror empty too)
+    else mirror valid
+        G->>G: rewrite license.json from mirror (silent, LIC-07)
+        G-->>H: {licensed:true, ...}
+    end
+    H-->>W: {ok, data:{licensed, settings, session:null}}
+    alt not licensed
+        W->>U: render #/activate — no sidebar, no other route
+        U->>W: paste code, press Enter
+        W->>H: POST /api/license/activate {code}
+        H->>G: activate(code)
+        G->>G: code.strip().lower() then compare_digest vs CODE
+        alt mismatch
+            G->>G: attempts += 1 (5 -> 30 s cooldown)
+            G-->>H: ImriError invalid_license_code
+            H-->>W: 403 {code:"invalid_license_code", details:{attempts_left, retry_after_s}}
+            W->>U: inline error under the field, countdown when cooling
+        else match
+            G->>G: write data/license.json with code_fingerprint, activated_at, school_name
+            G->>DB: settings license_key="PERPETUAL:<fp>", license_edition, license_activated_at
+            G->>DB: audit license_activated
+            G-->>H: {licensed:true, activated_at, school_name}
+            H-->>W: {ok, data:{licensed:true}}
+            W->>W: router.replace("#/login")
+        end
+    else licensed
+        W->>W: router.replace("#/login")
+    end
+    U->>W: username + password
+    W->>H: POST /api/auth/login
+    H->>S: login(username, password)
+    S->>S: is_rate_limited(username)?
+    S->>DB: SELECT * FROM users WHERE username=?
+    S->>S: verify_password (scrypt, constant-time)
+    alt invalid
+        S->>DB: audit auth.login_failed
+        S-->>H: ImriError invalid_credentials
+        H-->>W: 401
+    else valid
+        S->>DB: UPDATE users last_login_at, rehash if needs_rehash
+        S->>DB: INSERT sessions(token_hash, expires_at=+12h)
+        S->>DB: audit auth.login
+        S-->>H: {user, token, must_change_password}
+        H-->>W: Set-Cookie imri_sid (HttpOnly, SameSite=Strict) + data
+        W->>W: store.session = user, then start heartbeat (2 s)
+        W->>H: GET /api/dashboard
+        H->>DB: 10 aggregate queries in ONE handler (no N+1)
+        H-->>W: {kpis, due_today, overdue, charts, alerts}
+        W->>U: paint KPI cards, charts, lists; banner if must_change_password
+    end
+
+%% ============================================================ 2
+%% Issue a book — copy allocation, max_loans, reservation interaction
+sequenceDiagram
+    autonumber
+    actor U as Librarian
+    participant C as pages/circulation.js
+    participant R as ApiRouter
+    participant S as CirculationService
+    participant Cat as CatalogService
+    participant DB as Database
+
+    U->>C: scan copy barcode + Enter
+    C->>R: GET /api/books/lookup?barcode=IMRI-000123-2
+    R->>Cat: lookup_barcode()
+    Cat->>DB: SELECT book_copies JOIN books WHERE barcode=?
+    alt unknown barcode
+        Cat-->>R: ImriError not_found
+        R-->>C: 404 {code:"not_found"}
+        C->>U: inline "not found" under field, text preserved, focus kept
+    else found
+        Cat-->>R: {book, copy}
+        R-->>C: {ok, data}
+        C->>U: show title + copy no + status pill
+        U->>C: scan member code + Enter
+        C->>R: POST /api/circulation/issue {copy_barcode, member_code}
+        R->>S: issue(copy_barcode, member_code, actor)
+        S->>DB: BEGIN IMMEDIATE
+        S->>DB: SELECT member, copy, book, settings
+        alt member.status != active
+            S-->>R: ImriError member_suspended / member_expired
+        else copy.status != available
+            S-->>R: ImriError copy_unavailable
+        else open loans >= max_loans
+            S-->>R: ImriError max_loans_reached {limit, current}
+        else copy is held for another member (reservation status='ready', copy_id=copy)
+            S-->>R: ImriError copy_on_hold {holder_code, expires_at}
+        else already an active loan on this copy (partial unique index)
+            S-->>R: ImriError duplicate_active_loan
+        else ok
+            S->>DB: INSERT loans(issue_date=today, due_date=today+loan_days, status='on_loan')
+            S->>DB: UPDATE book_copies SET status='on_loan'
+            S->>Cat: refresh_book_rollup(book_id)
+            Cat->>DB: UPDATE books SET copies=COUNT(*), status=rollup
+            S->>DB: audit loan.issue
+            S->>DB: COMMIT
+            S-->>R: {loan, due_date, book, member}
+            R-->>C: {ok, data}
+            C->>U: toast "Issued · due 12 Nov", clear both fields, focus scan field
+        end
+        Note over S,R: any ImriError inside the transaction triggers ROLLBACK —<br/>no partial write, no orphan audit row
+    end
+
+%% ============================================================ 3
+%% Return -> fine -> queue promotion
+sequenceDiagram
+    autonumber
+    actor U as Librarian
+    participant C as pages/circulation.js
+    participant S as CirculationService
+    participant DB as Database
+
+    U->>C: scan copy barcode in Return mode
+    C->>S: POST /api/circulation/return {copy_barcode}
+    S->>DB: BEGIN IMMEDIATE
+    S->>DB: SELECT loan WHERE copy_id=? AND status='on_loan'
+    alt no open loan
+        S-->>C: 409 already_returned
+    else found
+        S->>S: days_late = max(0, (today - due_date).days)
+        S->>S: fine = money(days_late * settings.fine_per_day)
+        S->>DB: UPDATE loans SET return_date, status='returned', fine_amount, returned_by
+        S->>DB: SELECT reservations WHERE book_id=? AND status='open' ORDER BY queue_position LIMIT 1
+        alt someone waiting
+            S->>DB: UPDATE reservations SET status='ready', copy_id, ready_at, expires_at=+hold_days
+            S->>DB: UPDATE book_copies SET status='reserved'
+            S->>S: rebalance_queue(book_id)
+        else nobody waiting
+            S->>DB: UPDATE book_copies SET status='available'
+        end
+        S->>DB: refresh_book_rollup(book_id)
+        S->>DB: audit loan.return (with fine)
+        S->>DB: COMMIT
+        S-->>C: {loan, fine:{amount, days_late, balance}, queue:{promoted, next_member}}
+        C->>U: toast "Returned · fine RM 1.40" and "Held for SITI (copy reserved)"
+        opt fine > 0
+            C->>U: offer "Take payment" -> POST /api/loans/{id}/payments
+        end
+    end
+
+%% ============================================================ 4
+%% Import dry-run -> commit
+sequenceDiagram
+    autonumber
+    actor A as Admin
+    participant P as pages/catalogue.js
+    participant R as ApiRouter
+    participant T as TransferService
+    participant Cat as CatalogService
+    participant DB as Database
+
+    A->>P: pick books.csv
+    P->>R: POST /api/books/import/preview (raw bytes, ?filename=books.csv)
+    R->>T: preview_books(raw, filename, actor)
+    T->>T: decode utf-8-sig -> csv.reader / read_xlsx
+    T->>T: map headers via HEADER_ALIASES (ms/zh/en synonyms)
+    T->>T: create import_batches row (status='preview')
+    loop each row
+        T->>Cat: validate row (NO writes)
+        Cat-->>T: ok | ImriError(code, fields)
+        T->>DB: INSERT import_batch_items(row_no, status, code, message)
+    end
+    T->>T: cache rows under batch_token (uuid, 10 min TTL)
+    T-->>R: {batch_token, total, ok_count, error_count, preview[20], errors[50]}
+    R-->>P: {ok, data}
+    P->>A: 3-step wizard — step 2 shows counts + first 20 rows + red rows with reasons
+    A->>P: "Import 1,948 valid rows"
+    P->>R: POST /api/books/import/commit {batch_token}
+    R->>T: commit_books(token, actor)
+    alt token missing/expired
+        T-->>R: 410 import_expired
+    else valid
+        T->>DB: BEGIN IMMEDIATE
+        loop cached rows where status='ok'
+            T->>Cat: create_book(row, actor)
+            Cat->>DB: INSERT books
+            Cat->>DB: INSERT book_copies x copies (auto barcodes accession-1..N)
+            Cat->>DB: refresh_book_rollup
+        end
+        T->>DB: UPDATE import_batches SET status='committed', imported, rejected
+        T->>DB: audit import.commit
+        T->>DB: COMMIT
+        T-->>R: {imported, rejected, errors[], batch_id}
+        R-->>P: {ok, data}
+        P->>A: results table + "Export rejected rows" (CSV) + toast
+    end

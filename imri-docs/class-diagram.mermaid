@@ -1,0 +1,278 @@
+%% IMRI — class diagram
+%% Extracted from docs/ARCHITECTURE.md §5. Keep the two in sync.
+
+classDiagram
+    direction LR
+
+    class Config {
+        <<module>>
+        +str APP_NAME
+        +str APP_VERSION
+        +int SCHEMA_VERSION
+        +Path base_dir()
+        +Path data_dir()
+        +Path web_dir()
+        +str now_utc()
+        +str today_local()
+        +float money(x)
+        +dict DEFAULT_SETTINGS
+    }
+
+    class ImriError {
+        +str code
+        +int status
+        +dict fields
+        +dict details
+        +to_dict() dict
+    }
+
+    class Database {
+        +str path
+        -Connection _conn
+        -RLock _lock
+        +query(sql, params) list~dict~
+        +one(sql, params) dict
+        +execute(sql, params) int
+        +executemany(sql, rows) int
+        +transaction() ContextManager
+        +get_setting(key, default) str
+        +set_setting(key, value)
+        +all_settings() dict
+        +audit(actor, action, target, detail, ip)
+        +checkpoint(mode) bool
+        +integrity_check() dict
+        +row_counts() dict
+        +close()
+    }
+
+    class Migrator {
+        +int target
+        +dict STEPS
+        +ensure(conn)
+        +version(conn) int
+    }
+
+    class SecurityService {
+        +dict ROLE_CAPS
+        +hash_password(pw) str
+        +verify_password(pw, stored) bool
+        +needs_rehash(stored) bool
+        +login(username, pw, client) dict
+        +logout(token)
+        +session(token) dict
+        +require(user, cap) bool
+        +caps_for(role) list
+        +record_failure(username)
+        +is_rate_limited(username) int
+    }
+
+    class SessionStore {
+        +create(user_id, client) str
+        +lookup(token) dict
+        +touch(token_hash)
+        +revoke(token)
+        +revoke_user(user_id) int
+        +purge_expired() int
+    }
+
+    class LicenseGate {
+        -str CODE
+        +status() dict
+        +activate(code) dict
+        +require() void
+        +_read_file() dict
+        +_write_file(record)
+        +_mirror(record)
+        +_check_cooldown() int
+        +_record_failure() int
+    }
+
+    class CatalogService {
+        +list_books(filters, page) dict
+        +get_book(id) dict
+        +create_book(fields, actor) dict
+        +update_book(id, fields, actor) dict
+        +delete_book(id, actor)
+        +lookup_barcode(barcode) dict
+        +add_copies(book_id, count, opts, actor) list
+        +update_copy(copy_id, fields, actor) dict
+        +delete_copy(copy_id, actor)
+        +refresh_book_rollup(book_id)
+        +available_copies(book_id) int
+        +find_duplicates(isbn, title, authors) list
+        +validate_isbn(isbn) bool
+        +to_isbn13(isbn) str
+        +to_isbn10(isbn) str
+        +validate_dewey(code) bool
+        +validate_call_no(code) bool
+        +set_subjects(book_id, headings)
+        +set_languages(book_id, langs)
+        +set_marc(book_id, blob)
+        +generate_barcode(book, copy_no) str
+        +generate_accession() str
+    }
+
+    class MemberService {
+        +list_members(filters, page) dict
+        +get_member(id) dict
+        +profile(id) dict
+        +create_member(fields, actor) dict
+        +update_member(id, fields, actor) dict
+        +delete_member(id, actor)
+        +validate_ic(ic) bool
+        +reading_list(member_id) list
+        +add_to_reading_list(member_id, book_id, note) dict
+        +reserve_from_reading_list(member_id, item_id) dict
+    }
+
+    class CirculationService {
+        +float fine_per_day
+        +int loan_days
+        +int max_loans
+        +int max_renewals
+        +int hold_days
+        +issue(copy_ref, member_ref, actor) dict
+        +return_copy(loan_id, actor, condition) dict
+        +renew(loan_id, actor) dict
+        +mark_lost(loan_id, charge, actor) dict
+        +accrued_fine(loan) float
+        +overdue_days(loan, as_of) int
+        +balance(loan) float
+        +record_payment(loan_id, amount, actor, note) dict
+        +waive(loan_id, amount, reason, actor) dict
+        +overdue_list(as_of, page) dict
+        +active_loans(filters, page) dict
+        +reserve(book_id, member_id, actor) dict
+        +cancel_reservation(id, reason, actor)
+        +fulfil_reservation(id, copy_id, actor) dict
+        +expire_holds(as_of) dict
+        +rebalance_queue(book_id)
+        +_allocate_copy(book_id, reservation) dict
+        +_next_receipt_no() str
+    }
+
+    class ReportingService {
+        +collection(filters) dict
+        +circulation(from_date, to_date) dict
+        +membership(from_date, to_date) dict
+        +overdue_fines(as_of) dict
+        +trend(from_date, to_date, compare) dict
+        +dashboard(as_of) dict
+        +to_csv(report, path) str
+        +to_pdf(report, path, meta) str
+    }
+
+    class LabelService {
+        +qr_matrix(data, ec) list
+        +qr_svg(data, scale, border, ec) str
+        +code39_pattern(text) str
+        +code39_svg(data, scale, height, caption) str
+        +book_label_svg(copy, book, opts) str
+        +member_card_svg(member, opts) str
+        +sheet_svg(items, layout, paper) str
+    }
+
+    class TransferService {
+        +dict HEADER_ALIASES
+        +preview_books(raw, filename, actor) dict
+        +commit_books(token, actor) dict
+        +preview_members(raw, filename, actor) dict
+        +commit_members(token, actor) dict
+        +export_books(filters, fmt) dict
+        +export_members(filters, fmt) dict
+        +read_table(path) list
+        +write_csv(headers, rows, path) str
+        +write_xlsx(headers, rows, path) str
+        +_cache dict
+    }
+
+    class BackupService {
+        +str MANIFEST
+        +create(label) dict
+        +list() list
+        +verify(name) dict
+        +restore(name) dict
+        +_safe_extract(zf, dest)
+        +_sha256(path) str
+        +_prune(keep)
+    }
+
+    class NfcBridge {
+        +bool _loaded
+        +status() dict
+        +read_uid(timeout_ms) tuple
+        +read_text(timeout_ms) tuple
+        +write_text(text, timeout_ms) tuple
+        -_load_winscard() bool
+        -_apdu(handle, cmd, timeout) bytes
+    }
+
+    class PdfWriter {
+        +write(title, blocks, path, meta) str
+        +_paginate(lines) list
+        +_escape(text) str
+    }
+
+    class ApiRouter {
+        +dict ROUTES
+        +route(method, pattern, cap) decorator
+        +dispatch(request) Response
+        +envelope(data, meta) dict
+        +parse_page(query) dict
+        +path_params(pattern, path) dict
+    }
+
+    class HttpServer {
+        +str host
+        +int port
+        +float last_ping
+        +bool bye_armed
+        +int inflight
+        +serve() void
+        +shutdown() void
+        +last_ping_age() float
+        +arm_bye(grace) void
+        +cancel_bye() void
+    }
+
+    class AppWindow {
+        +launch(url, profile_dir) Popen
+        +wait_for_close(server, proc) void
+        +_find_browser() str
+    }
+
+    Database --> Migrator : runs on open
+    SecurityService --> Database : users, audit
+    SecurityService --> SessionStore : owns
+    SessionStore --> Database : sessions table
+    LicenseGate --> Database : settings mirror
+    LicenseGate ..> ImriError : raises
+    CatalogService --> Database
+    CatalogService ..> ImriError : raises
+    MemberService --> Database
+    MemberService --> CatalogService : book refs
+    CirculationService --> Database
+    CirculationService --> CatalogService : copy allocation
+    CirculationService --> MemberService : eligibility
+    CirculationService ..> ImriError : raises
+    ReportingService --> Database
+    ReportingService --> PdfWriter : PDF export
+    TransferService --> CatalogService : insert rows
+    TransferService --> MemberService : insert rows
+    TransferService --> Database : import_batches
+    BackupService --> Database : checkpoint
+    LabelService ..> CatalogService : label payloads
+    NfcBridge ..> ImriError : maps (ok, reason) to a code
+    ApiRouter --> SecurityService : capability check
+    ApiRouter --> CatalogService
+    ApiRouter --> MemberService
+    ApiRouter --> CirculationService
+    ApiRouter --> ReportingService
+    ApiRouter --> TransferService
+    ApiRouter --> BackupService
+    ApiRouter --> LabelService
+    ApiRouter --> NfcBridge
+    ApiRouter --> LicenseGate
+    ApiRouter ..> ImriError : maps to HTTP
+    HttpServer --> ApiRouter : delegates
+    AppWindow ..> HttpServer : lifecycle (ping/bye)
